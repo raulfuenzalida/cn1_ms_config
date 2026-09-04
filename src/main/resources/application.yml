@@ -25,7 +25,8 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          issuer-uri: ${JWT_ISSUER_URI:http://dummy-issuer}
+          issuer-uri: https://login.microsoftonline.com/14c46308-ab91-4693-b0c0-daddd7a8aab5/v2.0
+          audiences: api://{client-id}
 
 springdoc:
   api-docs:
