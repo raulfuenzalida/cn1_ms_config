@@ -13,6 +13,7 @@ services:
       - DB_USER=config_user
       - DB_PASSWORD=config_password
       - JWT_ISSUER_URI=${JWT_ISSUER_URI}
+      - CLIENT_ID=${CLIENT_ID}
     depends_on:
       - mysql
     networks:
