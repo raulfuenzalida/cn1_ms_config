@@ -26,7 +26,9 @@ spring:
       resourceserver:
         jwt:
           issuer-uri: https://login.microsoftonline.com/14c46308-ab91-4693-b0c0-daddd7a8aab5/v2.0
-          audiences: api://{client-id}
+          audiences:
+            - api://80bf85e9-a444-4754-b780-c65dfff74876
+            - 80bf85e9-a444-4754-b780-c65dfff74876
 
 springdoc:
   api-docs:
