@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  ms-config:
+    build: .
+    container_name: ms-config
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_PORT=8080
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=config_user
+      - DB_PASSWORD=config_password
+      - JWT_ISSUER_URI=${JWT_ISSUER_URI}
+      - CLIENT_ID=${CLIENT_ID}
+    depends_on:
+      - mysql
+    networks:
+      - printworks-network
+
+  mysql:
+    image: mysql:8.0
+    container_name: config-db
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root_password
+      - MYSQL_DATABASE=config_db
+      - MYSQL_USER=config_user
+      - MYSQL_PASSWORD=config_password
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - printworks-network
+
+volumes:
+  mysql-data:
+
+networks:
+  printworks-network:
+    driver: bridge
