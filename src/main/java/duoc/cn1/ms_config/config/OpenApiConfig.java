@@ -32,7 +32,7 @@ public class OpenApiConfig {
 								.url("https://www.apache.org/licenses/LICENSE-2.0.html")))
 				.servers(List.of(
 						new Server().url("http://localhost:8080").description("Servidor de desarrollo"),
-						new Server().url("https://api.printworks.com").description("Servidor de producción")
+						new Server().url("https://1335t86sik.execute-api.us-east-1.amazonaws.com").description("Servidor de producción")
 				))
 				.addSecurityItem(new SecurityRequirement().addList(securitySchemeName))
 				.components(new io.swagger.v3.oas.models.Components()
