@@ -12,8 +12,8 @@ Además, se integra con `ms-products` para notificar cambios de configuración q
 - Spring Data JPA
 - Spring Security con OAuth2 Resource Server
 - Spring Web / RestTemplate
-- AWS SDK v2 para Amazon Kinesis Data Streams (consumidor de inventario)
-- @Scheduled para polling de streams
+- Spring Kafka (consumidor de inventario)
+- MySQL 8.0
 - MySQL 8.0
 - Lombok
 - SpringDoc OpenAPI (Swagger)
@@ -137,41 +137,45 @@ El recálculo y la posterior activación de los productos son responsabilidad de
 `ms-config` es la fuente de verdad del stock de filamento. Cada filamento
 puede tener `stockGrams` (gramos disponibles, `NULL` = sin stock definido).
 
-El consumo llega de forma asíncrona desde `ms_orders` vía AWS Kinesis
-(stream `printworks.filament-consumption`) cuando un pedido pasa a
+El consumo llega de forma asíncrona desde `ms_orders` vía Apache Kafka
+(topic `printworks.filament-consumption`) cuando un pedido pasa a
 `CONFIRMED`. La lógica de descuento está en `FilamentService.consumeStock`:
 
 - Resta `grams` de `stock_grams` si el stock es suficiente.
 - Lanza `InsufficientStockException` si el stock es `NULL`, insuficiente
   o el consumo es inválido (≤ 0). El consumidor lo trata como error
-  permanente y envía el registro al dead-letter stream.
+  permanente y envía el registro al dead-letter topic.
 
 La tabla `processed_events` (constraint único `order_id + event_type`)
 permite verificar si un evento ya fue procesado, evitando doble descuento
-si Kinesis reentrega el mismo registro.
+si Kafka reentrega el mismo registro (at-least-once).
 
-### Consumidor Kinesis
+### Consumidor Kafka
 
 Componentes involucrados:
 
-- `kinesis/KinesisStreamConsumer.java`: polling genérico por shard
-  (`ListShards` → `GetShardIterator` → `GetRecords`). Mantiene un iterador
-  por shard en memoria (checkpoint volátil: al reiniciar vuelve a
-  `TRIM_HORIZON` y la idempotencia evita reprocesar). Si un iterador
-  expira o `getRecords` falla, se descarta y se renueva en el próximo poll.
-- `consumer/FilamentConsumptionConsumer.java`: procesa cada registro del
-  stream principal cada `kinesis.consumer.poll-interval-ms` (default 2s):
-  - JSON inválido o evento incompleto → `PutRecord` al stream DLS.
-  - Filamento inexistente o stock insuficiente → `PutRecord` al DLS.
-  - Error transitorio (Kinesis/BD) → la excepción sube, el iterador no
-    avanza y el registro se reintenta en el próximo ciclo.
+- `config/KafkaConfig.java`: `ConcurrentKafkaListenerContainerFactory`
+  con `DefaultErrorHandler` + `FixedBackOff(2s, 3 intentos)` +
+  `DeadLetterPublishingRecoverer`: los errores transitorios se reintentan
+  y luego van al topic `<topic>.DLT`. Una segunda factory sin error
+  handler sirve al auditor del DLT.
+- `consumer/FilamentConsumptionConsumer.java`: `@KafkaListener` sobre el
+  topic principal con consumer group `ms-config-filament-inventory`:
+  - JSON inválido o evento incompleto → envío manual al DLT + offset avanza.
+  - Filamento inexistente o stock insuficiente → envío manual al DLT.
   - `orderId` ya en `processed_events` → se omite (idempotente).
-- `consumer/DlsAuditConsumer.java`: consume el dead-letter stream
-  `printworks.filament-consumption-dls` y registra los eventos muertos
-  en log para auditoría.
+  - Error transitorio (BD, etc.) → se relanza: el ErrorHandler reintenta
+    con backoff y luego `DeadLetterPublishingRecoverer` envía al `.DLT`.
+- `consumer/DltAuditConsumer.java`: `@KafkaListener` sobre el topic DLT
+  (group `...-dlt-audit`) que registra en log los eventos muertos con sus
+  headers de origen (`dltReason`, `originalTopic`, `originalPartition`,
+  `originalOffset`).
 - `service/InventoryService.java`: aplica el consumo de forma atómica —
   descuenta todos los filamentos del evento y guarda el `ProcessedEvent`
   en una sola transacción.
+
+El manejo de offsets es automático (commit del consumer group): los
+offsets y el lag se monitorean desde Kafka UI / `kafka-consumer-groups`.
 
 El payload del evento es:
 
@@ -187,8 +191,9 @@ El payload del evento es:
 }
 ```
 
-Los registros enviados al DLS conservan el payload original envuelto en
-`{"dlsReason": "...", "originalData": <json original>}`.
+Los registros enviados al DLT conservan el payload original y agregan
+headers con el motivo (`dltReason`) y la posición de origen
+(`originalTopic`, `originalPartition`, `originalOffset`).
 
 ## Endpoints
 
@@ -220,19 +225,14 @@ El servicio utiliza las siguientes variables de entorno:
 - `DB_PASSWORD` - Contraseña de base de datos
 - `MS_PRODUCTS_BASE_URL` - URL base utilizada para comunicarse con `ms-products`. Default local: `http://localhost:8081`
 
-### Variables de Entorno (Kinesis)
+### Variables de Entorno (Kafka)
 
 | Variable | Descripción | Default |
 |---|---|---|
-| `AWS_REGION` | Región AWS de Kinesis | `us-east-1` |
-| `KINESIS_STREAM_FILAMENT_CONSUMPTION` | Stream principal de consumo | `printworks.filament-consumption` |
-| `KINESIS_STREAM_FILAMENT_CONSUMPTION_DLS` | Dead-letter stream | `printworks.filament-consumption-dls` |
-| `KINESIS_CONSUMER_APP_NAME` | Nombre lógico del consumidor | `ms-config-filament-inventory` |
-| `KINESIS_CONSUMER_POLL_INTERVAL_MS` | Intervalo entre polls | `2000` |
-| `KINESIS_CONSUMER_INITIAL_DELAY_MS` | Delay inicial del polling | `5000` |
-
-En AWS las credenciales las provee el IAM task role; en local se usan las
-credenciales del perfil/entorno AWS configurado.
+| `KAFKA_BOOTSTRAP_SERVERS` | Brokers del clúster (`host1:9092,...`) | `localhost:9092` |
+| `KAFKA_TOPIC_FILAMENT_CONSUMPTION` | Topic principal de consumo | `printworks.filament-consumption` |
+| `KAFKA_TOPIC_FILAMENT_CONSUMPTION_DLT` | Dead-letter topic | `printworks.filament-consumption.DLT` |
+| `KAFKA_CONSUMER_GROUP_ID` | Consumer group del inventario | `ms-config-filament-inventory` |
 
 Ejemplo local:
 
@@ -423,7 +423,7 @@ ms-config/
 │   │   └── ProductServiceClient.java
 │   │
 │   ├── config/
-│   │   ├── KinesisConfig.java
+│   │   ├── KafkaConfig.java
 │   │   ├── OpenApiConfig.java
 │   │   └── RestTemplateConfig.java
 │   │
@@ -449,9 +449,6 @@ ms-config/
 │   │   ├── FilamentDuplicateException.java
 │   │   ├── InsufficientStockException.java
 │   │   └── PrintingConfigNotFoundException.java
-│   │
-│   ├── kinesis/
-│   │   └── KinesisStreamConsumer.java
 │   │
 │   ├── model/
 │   │   ├── Filament.java
