@@ -29,18 +29,16 @@ spring:
           audiences:
             - api://80bf85e9-a444-4754-b780-c65dfff74876
             - 80bf85e9-a444-4754-b780-c65dfff74876
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP_ID:ms-config-filament-inventory}
+      auto-offset-reset: earliest
 
-aws:
-  region: ${AWS_REGION:us-east-1}
-
-kinesis:
-  stream:
-    filament-consumption: ${KINESIS_STREAM_FILAMENT_CONSUMPTION:printworks.filament-consumption}
-    filament-consumption-dls: ${KINESIS_STREAM_FILAMENT_CONSUMPTION_DLS:printworks.filament-consumption-dls}
-  consumer:
-    app-name: ${KINESIS_CONSUMER_APP_NAME:ms-config-filament-inventory}
-    poll-interval-ms: ${KINESIS_CONSUMER_POLL_INTERVAL_MS:2000}
-    initial-delay-ms: ${KINESIS_CONSUMER_INITIAL_DELAY_MS:5000}
+kafka:
+  topic:
+    filament-consumption: ${KAFKA_TOPIC_FILAMENT_CONSUMPTION:printworks.filament-consumption}
+    filament-consumption-dlt: ${KAFKA_TOPIC_FILAMENT_CONSUMPTION_DLT:printworks.filament-consumption.DLT}
 
 springdoc:
   api-docs:

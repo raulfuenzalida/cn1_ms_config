@@ -4,89 +4,83 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import duoc.cn1.ms_config.event.FilamentConsumptionEvent;
 import duoc.cn1.ms_config.exception.FilamentNotFoundException;
 import duoc.cn1.ms_config.exception.InsufficientStockException;
-import duoc.cn1.ms_config.kinesis.KinesisStreamConsumer;
 import duoc.cn1.ms_config.service.InventoryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.header.internals.RecordHeader;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
-import software.amazon.awssdk.core.SdkBytes;
-import software.amazon.awssdk.services.kinesis.KinesisClient;
-import software.amazon.awssdk.services.kinesis.model.PutRecordRequest;
-import software.amazon.awssdk.services.kinesis.model.Record;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Consumidor del stream printworks.filament-consumption.
+ * Consumidor del topic printworks.filament-consumption (consumer group
+ * ms-config-filament-inventory).
  *
- * Flujo por registro (patrón de la guía 3.3.3):
- *  - payload inválido / filamento inexistente / stock insuficiente
- *    → error permanente: se envía al dead-letter stream y se avanza.
- *  - error transitorio (Kinesis, BD) → la excepción sube, el iterador
- *    del shard no avanza y el registro se reintenta en el próximo poll.
+ * Manejo de errores (guía 3.3.3):
+ *  - payload inválido / evento incompleto → error permanente: se envía
+ *    al DLT manualmente y el offset avanza.
+ *  - filamento inexistente / stock insuficiente → error permanente: DLT.
  *  - orderId ya procesado → idempotencia, se omite.
+ *  - cualquier otra excepción → se relanza: DefaultErrorHandler reintenta
+ *    con backoff y luego DeadLetterPublishingRecoverer envía al .DLT.
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class FilamentConsumptionConsumer {
 
-	private final KinesisStreamConsumer streamConsumer;
 	private final InventoryService inventoryService;
-	private final KinesisClient kinesisClient;
+	private final KafkaTemplate<String, String> kafkaTemplate;
 	private final ObjectMapper objectMapper;
 
-	@Value("${kinesis.stream.filament-consumption}")
-	private String streamName;
+	@Value("${kafka.topic.filament-consumption}")
+	private String topic;
 
-	@Value("${kinesis.stream.filament-consumption-dls}")
-	private String dlsStreamName;
+	@Value("${kafka.topic.filament-consumption-dlt}")
+	private String dltTopic;
 
-	@Scheduled(
-		fixedDelayString = "${kinesis.consumer.poll-interval-ms:2000}",
-		initialDelayString = "${kinesis.consumer.initial-delay-ms:5000}"
+	@KafkaListener(
+		topics = "${kafka.topic.filament-consumption}",
+		containerFactory = "kafkaListenerContainerFactory"
 	)
-	public void poll() {
-		try {
-			streamConsumer.poll(streamName, this::processRecord);
-		} catch (Exception e) {
-			log.error("Error en polling del stream {}: {}", streamName, e.getMessage());
-		}
-	}
-
-	private void processRecord(Record record) {
-		String partitionKey = record.partitionKey();
-		String data = record.data().asString(StandardCharsets.UTF_8);
+	public void consume(ConsumerRecord<String, String> record) {
+		String key = record.key();
+		String value = record.value();
+		long offset = record.offset();
 
 		FilamentConsumptionEvent event;
 		try {
-			event = objectMapper.readValue(data, FilamentConsumptionEvent.class);
+			event = objectMapper.readValue(value, FilamentConsumptionEvent.class);
 		} catch (Exception e) {
-			log.error("[VALIDA] JSON inválido en {} (pk={}): {}", streamName, partitionKey, e.getMessage());
-			sendToDls(record, "INVALID_JSON");
+			log.error("[VALIDA] JSON inválido en topic={} partition={} offset={} key={}: {}",
+				topic, record.partition(), offset, key, e.getMessage());
+			sendToDlt(record, "INVALID_JSON");
 			return;
 		}
 
 		if (!isValid(event)) {
-			log.error("[VALIDA] Evento inválido orderId={} -> DLS", event.getOrderId());
-			sendToDls(record, "INVALID_EVENT");
+			log.error("[VALIDA] Evento inválido orderId={} -> DLT", event.getOrderId());
+			sendToDlt(record, "INVALID_EVENT");
 			return;
 		}
 
 		try {
 			inventoryService.processFilamentConsumption(event);
 		} catch (InsufficientStockException | FilamentNotFoundException e) {
-			log.error("[STOCK] {} orderId={} -> DLS", e.getMessage(), event.getOrderId());
-			sendToDls(record, e.getClass().getSimpleName());
+			log.error("[STOCK] {} orderId={} -> DLT", e.getMessage(), event.getOrderId());
+			sendToDlt(record, e.getClass().getSimpleName());
 		} catch (DataIntegrityViolationException e) {
 			log.warn("[IDEMP] orderId={} ya registrado (constraint) - se omite", event.getOrderId());
 		}
-		// Cualquier otra excepción sube al poll(): el iterador no avanza
-		// y el registro se reintenta en el próximo ciclo.
+		// Cualquier otra excepción sube al ErrorHandler: retry con backoff
+		// y luego DeadLetterPublishingRecoverer envía al .DLT.
 	}
 
 	private boolean isValid(FilamentConsumptionEvent event) {
@@ -102,21 +96,27 @@ public class FilamentConsumptionConsumer {
 		);
 	}
 
-	private void sendToDls(Record original, String reason) {
+	private void sendToDlt(ConsumerRecord<String, String> original, String reason) {
 		try {
-			PutRecordRequest request = PutRecordRequest.builder()
-				.streamName(dlsStreamName)
-				.partitionKey(original.partitionKey())
-				.data(SdkBytes.fromString(
-					"{\"dlsReason\":\"" + reason + "\",\"originalData\":"
-						+ original.data().asString(StandardCharsets.UTF_8) + "}",
-					StandardCharsets.UTF_8))
-				.build();
+			ProducerRecord<String, String> dltRecord = new ProducerRecord<>(
+				dltTopic, null, original.key(), original.value());
+			dltRecord.headers().add(new RecordHeader(
+				"dltReason", reason.getBytes(StandardCharsets.UTF_8)));
+			dltRecord.headers().add(new RecordHeader(
+				"originalTopic",
+				original.topic().getBytes(StandardCharsets.UTF_8)));
+			dltRecord.headers().add(new RecordHeader(
+				"originalPartition",
+				String.valueOf(original.partition()).getBytes(StandardCharsets.UTF_8)));
+			dltRecord.headers().add(new RecordHeader(
+				"originalOffset",
+				String.valueOf(original.offset()).getBytes(StandardCharsets.UTF_8)));
 
-			kinesisClient.putRecord(request);
-			log.warn("[DLS] Registro enviado a {} (motivo={})", dlsStreamName, reason);
+			kafkaTemplate.send(dltRecord);
+			log.warn("[DLT] Registro enviado a {} (motivo={})", dltTopic, reason);
 		} catch (Exception e) {
-			log.error("Error enviando registro a DLS {}: {}", dlsStreamName, e.getMessage());
+			log.error("Error enviando registro a DLT {}: {}", dltTopic, e.getMessage());
+			throw e;
 		}
 	}
 }
