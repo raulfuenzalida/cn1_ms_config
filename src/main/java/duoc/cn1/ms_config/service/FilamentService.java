@@ -7,6 +7,7 @@ import duoc.cn1.ms_config.dto.request.FilamentUpdateRequest;
 import duoc.cn1.ms_config.dto.response.FilamentResponse;
 import duoc.cn1.ms_config.exception.FilamentDuplicateException;
 import duoc.cn1.ms_config.exception.FilamentNotFoundException;
+import duoc.cn1.ms_config.exception.InsufficientStockException;
 import duoc.cn1.ms_config.model.Filament;
 import duoc.cn1.ms_config.repository.FilamentRepository;
 import lombok.RequiredArgsConstructor;
@@ -55,6 +56,8 @@ public class FilamentService {
 			request.getPricePerKg(),
 			request.getStatus()
 		);
+
+		filament.setStockGrams(request.getStockGrams());
 
 		Filament savedFilament =
 			filamentRepository.save(filament);
@@ -109,6 +112,12 @@ public class FilamentService {
 			);
 		}
 
+		if (request.getStockGrams() != null) {
+			filament.setStockGrams(
+				request.getStockGrams()
+			);
+		}
+
 		Filament updatedFilament =
 			filamentRepository.save(filament);
 
@@ -135,12 +144,46 @@ public class FilamentService {
 		return mapToResponse(updatedFilament);
 	}
 
+	/**
+	 * Descuenta gramos de stock del filamento indicado.
+	 * Usado por el consumidor de eventos de consumo de filamento.
+	 *
+	 * @throws FilamentNotFoundException si el filamento no existe
+	 * @throws InsufficientStockException si el stock es nulo, insuficiente o negativo
+	 */
+	public void consumeStock(Long filamentId, BigDecimal grams) {
+		Filament filament = filamentRepository.findById(filamentId)
+			.orElseThrow(() -> new FilamentNotFoundException(filamentId));
+
+		BigDecimal stock = filament.getStockGrams();
+
+		if (stock == null || grams == null || grams.signum() <= 0) {
+			throw new InsufficientStockException(
+				filamentId,
+				grams,
+				stock
+			);
+		}
+
+		if (stock.compareTo(grams) < 0) {
+			throw new InsufficientStockException(
+				filamentId,
+				grams,
+				stock
+			);
+		}
+
+		filament.setStockGrams(stock.subtract(grams));
+		filamentRepository.save(filament);
+	}
+
 	private FilamentResponse mapToResponse(Filament filament) {
 		return new FilamentResponse(
 			filament.getId(),
 			filament.getName(),
 			filament.getColor(),
 			filament.getPricePerKg(),
+			filament.getStockGrams(),
 			filament.getStatus(),
 			filament.getCreatedAt(),
 			filament.getUpdatedAt()

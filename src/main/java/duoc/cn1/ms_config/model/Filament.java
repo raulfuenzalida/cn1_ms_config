@@ -24,6 +24,9 @@ public class Filament {
 	@Column(name = "price_per_kg", nullable = false, precision = 10, scale = 2)
 	private BigDecimal pricePerKg;
 
+	@Column(name = "stock_grams", precision = 10, scale = 2)
+	private BigDecimal stockGrams;
+
 	@Enumerated(EnumType.STRING)
 	@Column(name = "status", nullable = false, length = 20)
 	private FilamentStatus status;
@@ -69,6 +72,14 @@ public class Filament {
 
 	public BigDecimal getPricePerKg() {
 		return pricePerKg;
+	}
+
+	public BigDecimal getStockGrams() {
+		return stockGrams;
+	}
+
+	public void setStockGrams(BigDecimal stockGrams) {
+		this.stockGrams = stockGrams;
 	}
 
 	public FilamentStatus getStatus() {

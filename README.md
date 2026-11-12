@@ -26,6 +26,7 @@ Además, se integra con `ms-products` para notificar cambios de configuración q
   - Listar filamentos
   - Actualizar filamentos
   - Activar o desactivar filamentos
+  - Administrar stock disponible en gramos (`stockGrams`)
 - Gestión de configuración de impresión:
   - Precio de electricidad por kWh
   - Consumo energético de la impresora
@@ -128,6 +129,24 @@ INACTIVE + OUTDATED
 La invalidación permite evitar que permanezcan publicados productos cuyo precio fue calculado utilizando costos anteriores.
 
 El recálculo y la posterior activación de los productos son responsabilidad de `ms-products` y del flujo administrativo correspondiente.
+
+### Consumo de inventario de filamento
+
+`ms-config` es la fuente de verdad del stock de filamento. Cada filamento
+puede tener `stockGrams` (gramos disponibles, `NULL` = sin stock definido).
+
+El consumo llega de forma asíncrona desde `ms_orders` vía AWS Kinesis
+(stream `printworks.filament-consumption`) cuando un pedido pasa a
+`CONFIRMED`. La lógica de descuento está en `FilamentService.consumeStock`:
+
+- Resta `grams` de `stock_grams` si el stock es suficiente.
+- Lanza `InsufficientStockException` si el stock es `NULL`, insuficiente
+  o el consumo es inválido (≤ 0). El consumidor decidirá reintentar o
+  enviar el evento al dead-letter stream.
+
+La tabla `processed_events` (constraint único `order_id + event_type`)
+permite verificar si un evento ya fue procesado, evitando doble descuento
+si Kinesis reentrega el mismo registro.
 
 ## Endpoints
 
@@ -234,8 +253,9 @@ src/main/resources/database/init.sql
 
 ### Tablas
 
-- `filaments` - Información y costos de filamentos de impresión 3D
+- `filaments` - Información, costos y stock (`stock_grams`) de filamentos de impresión 3D
 - `printing_config` - Configuración de costos energéticos de impresión
+- `processed_events` - Registro de eventos de consumo ya procesados (idempotencia del consumidor de inventario)
 
 Los demás microservicios no acceden directamente a `config_db`. Cuando necesitan esta información deben consumir la API de `ms-config`.
 
