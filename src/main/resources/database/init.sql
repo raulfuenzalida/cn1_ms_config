@@ -6,12 +6,22 @@ CREATE TABLE IF NOT EXISTS filaments (
     name VARCHAR(255) NOT NULL,
     color VARCHAR(255) NOT NULL,
     price_per_kg DECIMAL(10, 2) NOT NULL,
+    stock_grams DECIMAL(10, 2),
     status VARCHAR(20) NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY unique_name_color (name, color),
     CONSTRAINT chk_price_per_kg_positive CHECK (price_per_kg > 0),
+    CONSTRAINT chk_stock_grams_positive CHECK (stock_grams IS NULL OR stock_grams >= 0),
     CONSTRAINT chk_status_valid CHECK (status IN ('ACTIVE', 'INACTIVE'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS processed_events (
+    id_processed_event BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT NOT NULL,
+    event_type VARCHAR(50) NOT NULL,
+    processed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_order_event (order_id, event_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS printing_config (

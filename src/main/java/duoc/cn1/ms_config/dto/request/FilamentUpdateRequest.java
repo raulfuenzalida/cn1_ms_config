@@ -17,4 +17,7 @@ public class FilamentUpdateRequest {
 
 	@DecimalMin(value = "0.01", message = "El precio por kilogramo debe ser mayor que cero")
 	private BigDecimal pricePerKg;
+
+	@DecimalMin(value = "0", message = "El stock en gramos no puede ser negativo")
+	private BigDecimal stockGrams;
 }

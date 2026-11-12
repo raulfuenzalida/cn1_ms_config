@@ -17,6 +17,7 @@ public class FilamentResponse {
 	private String name;
 	private String color;
 	private BigDecimal pricePerKg;
+	private BigDecimal stockGrams;
 	private FilamentStatus status;
 	private LocalDateTime createdAt;
 	private LocalDateTime updatedAt;
