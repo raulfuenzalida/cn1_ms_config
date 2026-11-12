@@ -12,6 +12,8 @@ Además, se integra con `ms-products` para notificar cambios de configuración q
 - Spring Data JPA
 - Spring Security con OAuth2 Resource Server
 - Spring Web / RestTemplate
+- AWS SDK v2 para Amazon Kinesis Data Streams (consumidor de inventario)
+- @Scheduled para polling de streams
 - MySQL 8.0
 - Lombok
 - SpringDoc OpenAPI (Swagger)
@@ -141,12 +143,52 @@ El consumo llega de forma asíncrona desde `ms_orders` vía AWS Kinesis
 
 - Resta `grams` de `stock_grams` si el stock es suficiente.
 - Lanza `InsufficientStockException` si el stock es `NULL`, insuficiente
-  o el consumo es inválido (≤ 0). El consumidor decidirá reintentar o
-  enviar el evento al dead-letter stream.
+  o el consumo es inválido (≤ 0). El consumidor lo trata como error
+  permanente y envía el registro al dead-letter stream.
 
 La tabla `processed_events` (constraint único `order_id + event_type`)
 permite verificar si un evento ya fue procesado, evitando doble descuento
 si Kinesis reentrega el mismo registro.
+
+### Consumidor Kinesis
+
+Componentes involucrados:
+
+- `kinesis/KinesisStreamConsumer.java`: polling genérico por shard
+  (`ListShards` → `GetShardIterator` → `GetRecords`). Mantiene un iterador
+  por shard en memoria (checkpoint volátil: al reiniciar vuelve a
+  `TRIM_HORIZON` y la idempotencia evita reprocesar). Si un iterador
+  expira o `getRecords` falla, se descarta y se renueva en el próximo poll.
+- `consumer/FilamentConsumptionConsumer.java`: procesa cada registro del
+  stream principal cada `kinesis.consumer.poll-interval-ms` (default 2s):
+  - JSON inválido o evento incompleto → `PutRecord` al stream DLS.
+  - Filamento inexistente o stock insuficiente → `PutRecord` al DLS.
+  - Error transitorio (Kinesis/BD) → la excepción sube, el iterador no
+    avanza y el registro se reintenta en el próximo ciclo.
+  - `orderId` ya en `processed_events` → se omite (idempotente).
+- `consumer/DlsAuditConsumer.java`: consume el dead-letter stream
+  `printworks.filament-consumption-dls` y registra los eventos muertos
+  en log para auditoría.
+- `service/InventoryService.java`: aplica el consumo de forma atómica —
+  descuenta todos los filamentos del evento y guarda el `ProcessedEvent`
+  en una sola transacción.
+
+El payload del evento es:
+
+```json
+{
+  "eventType": "FILAMENT_CONSUMPTION",
+  "orderId": 42,
+  "orderNumber": "PW-000042",
+  "filaments": [
+    { "filamentId": 1, "grams": 120.50 }
+  ],
+  "timestamp": "2026-01-01T12:00:00"
+}
+```
+
+Los registros enviados al DLS conservan el payload original envuelto en
+`{"dlsReason": "...", "originalData": <json original>}`.
 
 ## Endpoints
 
@@ -177,6 +219,20 @@ El servicio utiliza las siguientes variables de entorno:
 - `DB_USER` - Usuario de base de datos. Default: `root`
 - `DB_PASSWORD` - Contraseña de base de datos
 - `MS_PRODUCTS_BASE_URL` - URL base utilizada para comunicarse con `ms-products`. Default local: `http://localhost:8081`
+
+### Variables de Entorno (Kinesis)
+
+| Variable | Descripción | Default |
+|---|---|---|
+| `AWS_REGION` | Región AWS de Kinesis | `us-east-1` |
+| `KINESIS_STREAM_FILAMENT_CONSUMPTION` | Stream principal de consumo | `printworks.filament-consumption` |
+| `KINESIS_STREAM_FILAMENT_CONSUMPTION_DLS` | Dead-letter stream | `printworks.filament-consumption-dls` |
+| `KINESIS_CONSUMER_APP_NAME` | Nombre lógico del consumidor | `ms-config-filament-inventory` |
+| `KINESIS_CONSUMER_POLL_INTERVAL_MS` | Intervalo entre polls | `2000` |
+| `KINESIS_CONSUMER_INITIAL_DELAY_MS` | Delay inicial del polling | `5000` |
+
+En AWS las credenciales las provee el IAM task role; en local se usan las
+credenciales del perfil/entorno AWS configurado.
 
 Ejemplo local:
 
@@ -367,8 +423,13 @@ ms-config/
 │   │   └── ProductServiceClient.java
 │   │
 │   ├── config/
+│   │   ├── KinesisConfig.java
 │   │   ├── OpenApiConfig.java
 │   │   └── RestTemplateConfig.java
+│   │
+│   ├── consumer/
+│   │   ├── DlsAuditConsumer.java
+│   │   └── FilamentConsumptionConsumer.java
 │   │
 │   ├── controller/
 │   │   ├── FilamentController.java
@@ -378,20 +439,29 @@ ms-config/
 │   │   ├── request/
 │   │   └── response/
 │   │
+│   ├── event/
+│   │   └── FilamentConsumptionEvent.java
+│   │
 │   ├── exception/
 │   │   ├── GlobalExceptionHandler.java
 │   │   ├── ErrorResponse.java
 │   │   ├── FilamentNotFoundException.java
 │   │   ├── FilamentDuplicateException.java
+│   │   ├── InsufficientStockException.java
 │   │   └── PrintingConfigNotFoundException.java
+│   │
+│   ├── kinesis/
+│   │   └── KinesisStreamConsumer.java
 │   │
 │   ├── model/
 │   │   ├── Filament.java
 │   │   ├── PrintingConfig.java
+│   │   ├── ProcessedEvent.java
 │   │   └── FilamentStatus.java
 │   │
 │   ├── repository/
 │   │   ├── FilamentRepository.java
+│   │   ├── ProcessedEventRepository.java
 │   │   └── PrintingConfigRepository.java
 │   │
 │   ├── security/
@@ -399,6 +469,7 @@ ms-config/
 │   │
 │   └── service/
 │       ├── FilamentService.java
+│       ├── InventoryService.java
 │       └── PrintingConfigService.java
 │
 ├── src/main/resources/
